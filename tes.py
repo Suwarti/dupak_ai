@@ -119,7 +119,7 @@ def cosine(a, b):
 def semantic_match(question: str, context: str, min_sim: float = 0.23) -> bool:
     if not question.strip() or not context.strip():
         return False
-    emb = GoogleGenerativeAIEmbeddings(model="text-embedding-004", google_api_key=os.environ.get("GOOGLE_API_KEY", ""))
+    emb = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=os.environ.get("GOOGLE_API_KEY", ""))
     q = emb.embed_query(question[:2000])
     c = emb.embed_query(context[:8000])
     return cosine(q, c) >= min_sim
@@ -177,7 +177,7 @@ def build_chroma(docs, persist_dir):
 
 def load_chroma(persist_dir):
     api_key = os.environ.get("GOOGLE_API_KEY", "")
-    embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004", google_api_key=api_key)
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=api_key)
     return Chroma(persist_directory=persist_dir, embedding_function=embeddings)
 
 
@@ -205,7 +205,7 @@ if clear_btn:
 if test_btn:
     try:
         emb = GoogleGenerativeAIEmbeddings(
-            model="text-embedding-004",
+            model="models/text-embedding-004",
             google_api_key=os.environ.get("GOOGLE_API_KEY", ""),
         )
         v = emb.embed_query("ping")
