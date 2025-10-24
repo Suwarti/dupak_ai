@@ -16,7 +16,7 @@ from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 # Loaders & splitters
-from langchain_community.document_loaders import PyMuPDFLoader
+from langchain_community.document_loaders import PyMuPDFLoader  # pip install pymupdf
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError:
@@ -40,22 +40,22 @@ from langchain_google_genai import (
 st.set_page_config(page_title="RAG • Gemini 2.5 Flash + Chroma", page_icon="📚", layout="wide")
 st.markdown("### 📚 DUPAK AI")
 
-# --- Secrets / ENV handling ---
-SECRETS_API_KEY = st.secrets.get("GOOGLE_API_KEY", "") if hasattr(st, "secrets") else ""
-GOOGLE_API_KEY_ENV = os.getenv("GOOGLE_API_KEY", SECRETS_API_KEY)
-
 # =========================
 # HELPERS
 # =========================
 def _normalize_text(s: str) -> str:
     if not s:
         return s
+    # satukan bentuk range
     s = s.replace("–", "-").replace("—", "-").replace("−", "-")
     s = re.sub(r"\b(s\.?d\.?|sd|sampai|hingga|to)\b", "-", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s*-\s*", "-", s)
+    s = re.sub(r"\s*-\s*", "-", s)  # 81 – 160 -> 81-160
+    # konsistenkan jam
     s = re.sub(r"\b(JAM|Jam)\b", "jam", s)
+    # kompres spasi
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 def ensure_writable_dir(path: str, fallback_name: str) -> str:
     """Pastikan path bisa ditulis. Jika gagal, pakai /mount/data/<fallback_name>.
@@ -88,19 +88,21 @@ def ensure_writable_dir(path: str, fallback_name: str) -> str:
 def list_pdfs(folder: str):
     return sorted(glob.glob(os.path.join(folder, "**/*.pdf"), recursive=True))
 
+
 def load_and_split(pdfs, chunk_size=1000, overlap=250):
     splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
     docs = []
     for p in pdfs:
         try:
-            loader = PyMuPDFLoader(p)
-            pages = loader.load()
+            loader = PyMuPDFLoader(p)      # lebih baik untuk tabel
+            pages = loader.load()          # tiap halaman metadata: source, page
         except Exception as e:
             st.warning(f"Gagal membaca PDF: {os.path.basename(p)} — {e}")
             continue
         for d in pages:
             d.page_content = _normalize_text(d.page_content or "")
         parts = splitter.split_documents(pages)
+        # buang dokumen kosong & terlalu panjang (pangkas panjang ekstrim untuk embed stability)
         pruned = []
         for d in parts:
             if not d.page_content or not d.page_content.strip():
@@ -111,13 +113,16 @@ def load_and_split(pdfs, chunk_size=1000, overlap=250):
         docs.extend(pruned)
     return docs
 
+
 # --- semantic similarity helper ---
 def cosine(a, b):
     a, b = np.array(a, dtype=float), np.array(b, dtype=float)
     den = (norm(a) * norm(b)) + 1e-8
     return float(np.dot(a, b) / den)
 
+
 def semantic_match(question: str, context: str, min_sim: float = 0.23) -> bool:
+    """Cek kedekatan semantik Q vs konteks dengan embedding Gemini; jika rendah → fallback."""
     if not question.strip() or not context.strip():
         return False
     emb = GoogleGenerativeAIEmbeddings(
@@ -125,11 +130,13 @@ def semantic_match(question: str, context: str, min_sim: float = 0.23) -> bool:
         google_api_key=os.environ.get("GOOGLE_API_KEY", ""),
     )
     q = emb.embed_query(question[:2000])
-    c = emb.embed_query(context[:8000])
+    c = emb.embed_query(context[:8000])  # ringkas konteks
     return cosine(q, c) >= min_sim
+
 
 # --- range variations ---
 def range_variations(q: str):
+    """Varian rentang angka deterministik (tanpa LLM)."""
     qn = _normalize_text(q)
     m = re.search(r"(\d{1,4})-(\d{1,4})", qn)
     vars = set()
@@ -141,6 +148,7 @@ def range_variations(q: str):
         ])
     return list(vars)
 
+
 # =========================
 # VECTORSTORE HELPERS (Chroma)
 # =========================
@@ -149,19 +157,21 @@ def _batch(items: List, n: int):
     for i in range(0, len(items), n):
         yield items[i:i+n]
 
+
 def build_chroma(docs, persist_dir):
     api_key = os.environ.get("GOOGLE_API_KEY", "")
     if not api_key:
-        st.sidebar.error("GOOGLE_API_KEY belum diset di Secrets.")
+        st.sidebar.error("GOOGLE_API_KEY belum diset di Secrets/ENV.")
         return None
 
-    # pastikan dir bisa ditulis
+    # pastikan dir bisa ditulis (hindari SQLite code 14)
     try:
         os.makedirs(persist_dir, exist_ok=True)
     except Exception:
         persist_dir = ensure_writable_dir(persist_dir, "chroma_store")
         st.sidebar.warning(f"Persist dir dialihkan ke: {persist_dir}")
 
+    # Inisialisasi embeddings (pakai prefix models/)
     try:
         embeddings = GoogleGenerativeAIEmbeddings(
             model="models/text-embedding-004",
@@ -172,7 +182,8 @@ def build_chroma(docs, persist_dir):
         st.sidebar.error(f"[INIT] Embedding init error: {repr(e)}")
         return None
 
-    BATCH = 8  # kecil untuk menghindari rate limit
+    # Tambah dokumen secara bertahap (hindari rate limit / payload besar)
+    BATCH = 16  # turunkan ke 8/4 jika masih 429
     last_err = None
     for chunk in _batch(docs, BATCH):
         for attempt in range(5):
@@ -181,7 +192,7 @@ def build_chroma(docs, persist_dir):
                 break
             except Exception as e:
                 last_err = e
-                time.sleep(2 ** attempt)  # 1,2,4,8,16
+                time.sleep(2 ** attempt)  # 1,2,4,8,16 detik backoff
         else:
             st.sidebar.error(f"[ADD] Embed gagal (detail): {repr(last_err)}")
             return None
@@ -196,10 +207,9 @@ def build_chroma(docs, persist_dir):
 
 
 def load_chroma(persist_dir):
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
-        google_api_key=api_key,
+        google_api_key=os.environ.get("GOOGLE_API_KEY", ""),
     )
     return Chroma(persist_directory=persist_dir, embedding_function=embeddings)
 
@@ -214,29 +224,44 @@ def load_docs_pickle(path):
     with open(path, "rb") as f:
         return pickle.load(f)
 
-# =========================
-# SIDEBAR UI (set folders)
-# =========================
-# Input mentah dari user
-_pdf_input = st.sidebar.text_input("Folder PDF lokal", value="./pdfs")
-_chroma_input = st.sidebar.text_input("Folder Chroma persist", value="./chroma_store")
 
-# Pastikan bisa ditulis
-pdf_dir = ensure_writable_dir(_pdf_input, "pdfs")
-chroma_dir = ensure_writable_dir(_chroma_input, "chroma_store")
-docs_dump = os.path.join(chroma_dir, "docs.pkl")
+# =========================
+# SIDEBAR: Inputs & Controls
+# =========================
+GOOGLE_API_KEY_ENV = os.getenv("GOOGLE_API_KEY", "")
+GOOGLE_API_KEY = st.sidebar.text_input(
+    "Masukkan GOOGLE_API_KEY (Google AI Studio):",
+    value=GOOGLE_API_KEY_ENV,
+    type="password",
+)
+if GOOGLE_API_KEY:
+    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-st.sidebar.caption(f"PDF dir: {pdf_dir}")
-st.sidebar.caption(f"Chroma dir: {chroma_dir}")
+st.sidebar.header("⚙️ Pengaturan")
+# default ke path yang writeable di Streamlit Cloud
+pdf_dir_in = st.sidebar.text_input("Folder PDF lokal", value="/mount/data/pdfs")
+chroma_dir_in = st.sidebar.text_input("Folder Chroma persist", value="/mount/data/chroma_store")
+
+# validasi writeable
+pdf_dir = ensure_writable_dir(pdf_dir_in, "pdfs")
+chroma_dir = ensure_writable_dir(chroma_dir_in, "chroma_store")
+docs_dump = os.path.join(chroma_dir, "docs.pkl")  # cache dokumen untuk BM25
+
+chunk_size = st.sidebar.slider("Ukuran chunk (karakter)", 500, 2500, 1000, 50)
+chunk_overlap = st.sidebar.slider("Overlap", 0, 600, 250, 10)
+top_k = st.sidebar.slider("Top-K retrieval", 3, 15, 10, 1)
 
 # buat folder pdf_dir kalau belum ada
 os.makedirs(pdf_dir, exist_ok=True)
 
 # Buttons
-with st.sidebar:
-    build_btn = st.button("🔨 Build / Refresh Index", use_container_width=True)
-    clear_btn = st.button("🧹 Clear Index", use_container_width=True)
-    test_btn = st.button("🔍 Test Embedding", help="Cek apakah API key & model embedding bisa diakses.", use_container_width=True)
+build_btn = st.sidebar.button("🔨 Build / Refresh Index")
+clear_btn = st.sidebar.button("🧹 Clear Index")
+
+def _show_dirs():
+    st.sidebar.caption(f"PDF dir: {pdf_dir}")
+    st.sidebar.caption(f"Chroma dir: {chroma_dir}")
+_show_dirs()
 
 # =========================
 # INDEX MANAGEMENT
@@ -249,7 +274,8 @@ if clear_btn:
     except Exception as e:
         st.sidebar.error(f"Gagal clear index: {repr(e)}")
 
-if test_btn:
+# Tombol test embedding (diagnostik)
+if st.sidebar.button("🔍 Test Embedding"):
     try:
         emb = GoogleGenerativeAIEmbeddings(
             model="models/text-embedding-004",
@@ -260,32 +286,29 @@ if test_btn:
     except Exception as e:
         st.sidebar.error(f"[TEST] Gagal embed: {repr(e)}")
 
-if 'GOOGLE_API_KEY' not in os.environ or not os.environ['GOOGLE_API_KEY']:
-    # Sidebar input untuk API key (opsional)
-    GOOGLE_API_KEY = st.sidebar.text_input("Masukkan GOOGLE_API_KEY (Google AI Studio):", value=GOOGLE_API_KEY_ENV, type="password")
-    if GOOGLE_API_KEY:
-        os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-
-if 'GOOGLE_API_KEY' in os.environ and build_btn:
+if build_btn:
     pdfs = list_pdfs(pdf_dir)
     if not pdfs:
         st.sidebar.error(f"Tidak ditemukan PDF di: {pdf_dir}")
+    elif not os.environ.get("GOOGLE_API_KEY"):
+        st.sidebar.error("Set GOOGLE_API_KEY dulu (sidebar).")
     else:
         with st.spinner("📥 Membaca PDF & membangun index Chroma + BM25..."):
             docs = load_and_split(pdfs, chunk_size, chunk_overlap)
             if not docs:
                 st.sidebar.error("Tidak ada teks yang bisa diindeks dari PDF.")
             else:
-                vs_temp = build_chroma(docs, chroma_dir)
+                vs_temp = build_chroma(docs, chroma_dir)   # embeddings (dense)
                 if vs_temp is None:
                     st.sidebar.error("Build index gagal. Lihat error detail di atas.")
                 else:
-                    save_docs_pickle(docs, docs_dump)
+                    save_docs_pickle(docs, docs_dump)          # cache untuk BM25 (lexical)
                     try:
                         count = vs_temp._collection.count()
                     except Exception:
                         count = "?"
                     st.sidebar.success(f"Index siap ✅ ({count} chunk tersimpan)")
+
 
 # =========================
 # PREP LLM, VECTORSTORE, RETRIEVERS
@@ -317,6 +340,7 @@ if os.environ.get("GOOGLE_API_KEY"):
 # =========================
 # PROMPTS
 # =========================
+# RAG: Natural, jika konteks dipakai -> jawab HANYA dari konteks
 rag_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -365,7 +389,9 @@ mq_prompt = PromptTemplate.from_template(
 # CHAT STATE & ACTIONS
 # =========================
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Ask DUPAK AI"}]
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Ask DUPAK AI"}
+    ]
 st.session_state.setdefault("debug_context", "")
 
 col1, col2, _ = st.columns([1, 1, 6])
@@ -391,7 +417,7 @@ for m in st.session_state.messages:
         st.markdown(m["content"])
 
 # =========================
-# CHAT INPUT + RAG
+# CHAT INPUT + RAG (Ensemble + MultiQuery + Range Variations + Gate + SimCheck)
 # =========================
 user_input = st.chat_input("Ketik pertanyaanmu di sini…")
 
@@ -401,18 +427,21 @@ if user_input:
         st.markdown(user_input)
 
     answer = "Maaf, model belum siap."
-    context_text = ""
+    context_text = ""  # selalu terdefinisi
 
     if llm is None:
         answer = "Maaf, kunci API belum diisi."
     else:
         use_rag = (vs is not None) and (docs_for_bm25 is not None)
+
         if use_rag:
+            # 1) Retrievers: BM25 + Vector
             try:
                 bm25 = BM25Retriever.from_documents(docs_for_bm25)
                 vec_ret = vs.as_retriever(search_kwargs={"k": top_k})
                 ens = EnsembleRetriever(retrievers=[vec_ret, bm25], weights=[0.5, 0.5])
 
+                # 2) MultiQuery
                 mq = MultiQueryRetriever.from_llm(
                     retriever=ens,
                     llm=llm,
@@ -420,12 +449,14 @@ if user_input:
                     prompt=mq_prompt,
                 )
 
+                # 3) Kumpulkan dokumen relevan
                 retrieved_docs = []
-                retrieved_docs += ens.get_relevant_documents(user_input)
-                for v in range_variations(user_input):
-                    retrieved_docs += ens.get_relevant_documents(v)
-                retrieved_docs += mq.get_relevant_documents(user_input)
+                retrieved_docs += ens.get_relevant_documents(user_input)  # original
+                for vq in range_variations(user_input):                    # variasi range deterministik
+                    retrieved_docs += ens.get_relevant_documents(vq)
+                retrieved_docs += mq.get_relevant_documents(user_input)   # multiquery
 
+                # 4) Dedup & gabungkan
                 seen = set()
                 merged_docs = []
                 for d in retrieved_docs:
@@ -444,10 +475,13 @@ if user_input:
                 st.warning(f"Retriever error, fallback ke LLM: {repr(e)}")
                 use_rag = False
 
+        # Simpan untuk debug
         st.session_state["debug_context"] = context_text
 
+        # ====== GATING KEPUTUSAN AKHIR ======
         use_rag_flag = False
         if use_rag and context_text.strip():
+            # Gate 1: LLM gatekeeper (USE / SKIP)
             gate_ok = False
             if gate_chain is not None:
                 try:
@@ -455,7 +489,7 @@ if user_input:
                     gate_ok = decision.startswith("USE")
                 except Exception:
                     gate_ok = False
-            sem_ok = False
+            # Gate 2: Semantic similarity (embedding)
             try:
                 sem_ok = semantic_match(user_input, context_text, min_sim=0.23)
             except Exception:
@@ -466,15 +500,14 @@ if user_input:
 
         with st.chat_message("assistant"):
             with st.spinner("Sedang menyusun jawaban…"):
-                try:
-                    if use_rag_flag and rag_chain is not None:
-                        answer = rag_chain.invoke({"context": context_text, "question": user_input})
-                    elif fallback_chain is not None:
-                        answer = fallback_chain.invoke({"question": user_input})
-                    else:
-                        answer = "Model LLM tidak tersedia. Pastikan GOOGLE_API_KEY sudah diisi."
-                except Exception as e:
-                    answer = f"Terjadi kesalahan saat menyusun jawaban: {repr(e)}"
+                if use_rag_flag and rag_chain is not None:
+                    # ✅ Jawaban pertama dari PDF (RAG)
+                    answer = rag_chain.invoke({"context": context_text, "question": user_input})
+                elif fallback_chain is not None:
+                    # ✅ Fallback ke Gemini default
+                    answer = fallback_chain.invoke({"question": user_input})
+                else:
+                    answer = "Model LLM tidak tersedia. Pastikan GOOGLE_API_KEY sudah diisi."
             st.markdown(answer)
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
