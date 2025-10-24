@@ -127,11 +127,8 @@ Lalu buka browser dan akses:
 
 ## 💬 Contoh Pertanyaan yang Didukung  
 
-- “Berapa angka kredit bagi dosen lulusan magister?”  
-- “Syarat kenaikan ke jabatan lektor kepala?”  
-- “Berapa angka kredit untuk publikasi jurnal nasional?”  
-- “Berapa poin membimbing tesis utama?”  
-- “Apakah kegiatan seminar internasional dapat dihitung angka kredit?”  
+- "Berapa angka kredit bagi dosen lulusan magister?"  
+- "Kalau aku membimbing tesis utama, berapa angka kredit per lulusan?"   
 
 ---
 
