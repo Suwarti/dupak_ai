@@ -5,6 +5,13 @@
 **DUPAK (Daftar Usulan Penetapan Angka Kredit)** adalah sistem resmi penilaian angka kredit untuk jabatan akademik dosen di Indonesia.  
 Melalui **DUPAK AI**, proses penelusuran peraturan dapat dilakukan lebih cepat dan efisien menggunakan teknologi AI modern.  
 
+## 🌐 Coba Langsung Aplikasinya  
+
+🚀 **[Klik di sini untuk membuka DUPAK AI di Streamlit Cloud](https://dupakai-8xnaqqwzmsptt3rrjdhamy.streamlit.app/)**  
+
+Aplikasi ini bisa langsung digunakan tanpa instalasi.  
+Pastikan kamu punya koneksi internet aktif dan akun Google AI Studio (untuk API key bila dibutuhkan).  
+
 ---
 
 ## 🧩 Deskripsi  
