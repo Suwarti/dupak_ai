@@ -33,7 +33,7 @@ from langchain_google_genai import (
 # =========================
 # STREAMLIT CONFIG
 # =========================
-st.set_page_config(page_title="RAG • Gemini 2.5 Flash + Chroma", page_icon="📚", layout="wide")
+st.set_page_config(page_title="DUPAK AI", page_icon="📚", layout="wide")
 st.markdown("### 📚 DUPAK AI")
 
 # =========================
