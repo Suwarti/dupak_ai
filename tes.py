@@ -4,6 +4,7 @@ import glob
 import pickle
 import shutil
 import time
+import tempfile
 from typing import List
 
 import numpy as np
@@ -43,32 +44,6 @@ st.markdown("### 📚 DUPAK AI")
 SECRETS_API_KEY = st.secrets.get("GOOGLE_API_KEY", "") if hasattr(st, "secrets") else ""
 GOOGLE_API_KEY_ENV = os.getenv("GOOGLE_API_KEY", SECRETS_API_KEY)
 
-# Sidebar
-GOOGLE_API_KEY = st.sidebar.text_input(
-    "Masukkan GOOGLE_API_KEY (Google AI Studio):",
-    value=GOOGLE_API_KEY_ENV,
-    type="password",
-)
-if GOOGLE_API_KEY:
-    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-
-st.sidebar.header("⚙️ Pengaturan")
-pdf_dir = st.sidebar.text_input("Folder PDF lokal", value="./pdfs")
-chroma_dir = st.sidebar.text_input("Folder Chroma persist", value="./chroma_store")
-docs_dump = os.path.join(chroma_dir, "docs.pkl")
-chunk_size = st.sidebar.slider("Ukuran chunk (karakter)", 500, 2500, 1000, 50)
-chunk_overlap = st.sidebar.slider("Overlap", 0, 600, 250, 10)
-top_k = st.sidebar.slider("Top-K retrieval", 3, 15, 10, 1)
-
-# buat folder pdf_dir kalau belum ada
-os.makedirs(pdf_dir, exist_ok=True)
-
-# Buttons
-with st.sidebar:
-    build_btn = st.button("🔨 Build / Refresh Index", use_container_width=True)
-    clear_btn = st.button("🧹 Clear Index", use_container_width=True)
-    test_btn = st.button("🔍 Test Embedding", help="Cek apakah API key & model embedding bisa diakses.", use_container_width=True)
-
 # =========================
 # HELPERS
 # =========================
@@ -81,6 +56,34 @@ def _normalize_text(s: str) -> str:
     s = re.sub(r"\b(JAM|Jam)\b", "jam", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+def ensure_writable_dir(path: str, fallback_name: str) -> str:
+    """Pastikan path bisa ditulis. Jika gagal, pakai /mount/data/<fallback_name>.
+    Jika masih gagal, pakai tempdir. Mengembalikan path final yang aman."""
+    # 1) coba path yang diminta
+    try:
+        os.makedirs(path, exist_ok=True)
+        testfile = os.path.join(path, ".write_test")
+        with open(testfile, "w") as f:
+            f.write("ok")
+        os.remove(testfile)
+        return path
+    except Exception:
+        pass
+    # 2) coba /mount/data/<fallback_name>
+    try:
+        mount_path = os.path.join("/mount/data", fallback_name)
+        os.makedirs(mount_path, exist_ok=True)
+        testfile = os.path.join(mount_path, ".write_test")
+        with open(testfile, "w") as f:
+            f.write("ok")
+        os.remove(testfile)
+        return mount_path
+    except Exception:
+        pass
+    # 3) terakhir, tempdir
+    return tempfile.mkdtemp(prefix=f"{fallback_name}_")
+
 
 def list_pdfs(folder: str):
     return sorted(glob.glob(os.path.join(folder, "**/*.pdf"), recursive=True))
@@ -152,6 +155,13 @@ def build_chroma(docs, persist_dir):
         st.sidebar.error("GOOGLE_API_KEY belum diset di Secrets.")
         return None
 
+    # pastikan dir bisa ditulis
+    try:
+        os.makedirs(persist_dir, exist_ok=True)
+    except Exception:
+        persist_dir = ensure_writable_dir(persist_dir, "chroma_store")
+        st.sidebar.warning(f"Persist dir dialihkan ke: {persist_dir}")
+
     try:
         embeddings = GoogleGenerativeAIEmbeddings(
             model="models/text-embedding-004",
@@ -205,6 +215,30 @@ def load_docs_pickle(path):
         return pickle.load(f)
 
 # =========================
+# SIDEBAR UI (set folders)
+# =========================
+# Input mentah dari user
+_pdf_input = st.sidebar.text_input("Folder PDF lokal", value="./pdfs")
+_chroma_input = st.sidebar.text_input("Folder Chroma persist", value="./chroma_store")
+
+# Pastikan bisa ditulis
+pdf_dir = ensure_writable_dir(_pdf_input, "pdfs")
+chroma_dir = ensure_writable_dir(_chroma_input, "chroma_store")
+docs_dump = os.path.join(chroma_dir, "docs.pkl")
+
+st.sidebar.caption(f"PDF dir: {pdf_dir}")
+st.sidebar.caption(f"Chroma dir: {chroma_dir}")
+
+# buat folder pdf_dir kalau belum ada
+os.makedirs(pdf_dir, exist_ok=True)
+
+# Buttons
+with st.sidebar:
+    build_btn = st.button("🔨 Build / Refresh Index", use_container_width=True)
+    clear_btn = st.button("🧹 Clear Index", use_container_width=True)
+    test_btn = st.button("🔍 Test Embedding", help="Cek apakah API key & model embedding bisa diakses.", use_container_width=True)
+
+# =========================
 # INDEX MANAGEMENT
 # =========================
 if clear_btn:
@@ -226,12 +260,16 @@ if test_btn:
     except Exception as e:
         st.sidebar.error(f"[TEST] Gagal embed: {repr(e)}")
 
-if build_btn:
+if 'GOOGLE_API_KEY' not in os.environ or not os.environ['GOOGLE_API_KEY']:
+    # Sidebar input untuk API key (opsional)
+    GOOGLE_API_KEY = st.sidebar.text_input("Masukkan GOOGLE_API_KEY (Google AI Studio):", value=GOOGLE_API_KEY_ENV, type="password")
+    if GOOGLE_API_KEY:
+        os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+
+if 'GOOGLE_API_KEY' in os.environ and build_btn:
     pdfs = list_pdfs(pdf_dir)
     if not pdfs:
         st.sidebar.error(f"Tidak ditemukan PDF di: {pdf_dir}")
-    elif not os.environ.get("GOOGLE_API_KEY"):
-        st.sidebar.error("Set GOOGLE_API_KEY dulu (sidebar/Secrets).")
     else:
         with st.spinner("📥 Membaca PDF & membangun index Chroma + BM25..."):
             docs = load_and_split(pdfs, chunk_size, chunk_overlap)
