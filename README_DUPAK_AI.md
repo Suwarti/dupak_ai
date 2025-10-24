@@ -146,39 +146,5 @@ Lalu buka browser dan akses:
 
 ---
 
-## 🧰 Contoh `requirements.txt`  
 
-Jika belum ada, buat file `requirements.txt` berisi:  
 
-```
-streamlit
-langchain
-langchain-core
-langchain-community
-langchain-google-genai
-chromadb
-numpy
-pymupdf
-tiktoken
-```
-
----
-
-## 🧾 Lisensi  
-
-Proyek ini bersifat **open source** untuk tujuan edukasi dan pengembangan AI akademik.  
-Pastikan dokumen PDF yang digunakan adalah salinan resmi yang diizinkan untuk penggunaan internal.  
-
----
-
-## 🤝 Kontribusi  
-
-Kontribusi terbuka untuk siapa pun yang ingin meningkatkan akurasi, performa, atau fitur DUPAK AI.  
-Silakan buat *pull request* atau *issue* baru di repositori GitHub.  
-
----
-
-## ⭐ Dukungan  
-
-Jika DUPAK AI bermanfaat untuk Anda,  
-jangan lupa beri ⭐ di repositori ini! 🙌  
