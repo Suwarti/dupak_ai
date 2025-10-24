@@ -36,30 +36,10 @@ from langchain_google_genai import (
 st.set_page_config(page_title="RAG • Gemini 2.5 Flash + Chroma", page_icon="📚", layout="wide")
 st.markdown("### 📚 DUPAK AI")
 
-# Sidebar
-GOOGLE_API_KEY_ENV = os.getenv("GOOGLE_API_KEY", "")
-GOOGLE_API_KEY = st.sidebar.text_input("Masukkan GOOGLE_API_KEY (Google AI Studio):", value=GOOGLE_API_KEY_ENV, type="password")
-if GOOGLE_API_KEY:
-    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-
-st.sidebar.header("⚙️ Pengaturan")
-pdf_dir = st.sidebar.text_input("Folder PDF lokal", value="./pdfs")
-# IMPORTANT: default path yang bisa ditulis di Streamlit Cloud
-chroma_dir = st.sidebar.text_input("Folder Chroma persist", value="/mount/data/chroma_store")
-docs_dump = os.path.join(chroma_dir, "docs.pkl")  # cache dokumen untuk BM25
-chunk_size = st.sidebar.slider("Ukuran chunk (karakter)", 500, 2500, 1000, 50)
-chunk_overlap = st.sidebar.slider("Overlap", 0, 600, 250, 10)
-top_k = st.sidebar.slider("Top-K retrieval", 3, 15, 10, 1)
-
-# (Biarkan PDF hanya dibaca; jangan paksa makedirs pada repo)
-# os.makedirs(pdf_dir, exist_ok=True)
-
-build_btn = st.sidebar.button("🔨 Build / Refresh Index")
-clear_btn = st.sidebar.button("🧹 Clear Index")
-
 # =========================
-# HELPERS
+# HELPERS (infra only; logic RAG tidak diubah)
 # =========================
+
 def _normalize_text(s: str) -> str:
     if not s:
         return s
@@ -73,8 +53,32 @@ def _normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def list_pdfs(folder: str):
     return sorted(glob.glob(os.path.join(folder, "**/*.pdf"), recursive=True))
+
+
+def _ensure_persist_dir(path: str) -> str:
+    """Pastikan path bisa ditulis. Coba berurutan: user path -> /mount/data/chroma_store -> $HOME/.cache/chroma_store -> /tmp/chroma_store."""
+    candidates = [
+        path,
+        "/mount/data/chroma_store",
+        os.path.join(os.path.expanduser("~"), ".cache", "chroma_store"),
+        "/tmp/chroma_store",
+    ]
+    for p in candidates:
+        try:
+            os.makedirs(p, exist_ok=True)
+            testf = os.path.join(p, ".write_test")
+            with open(testf, "w") as f:
+                f.write("ok")
+            os.remove(testf)
+            return p
+        except Exception:
+            continue
+    # terakhir: tetap kembalikan path awal (biar kompatibel), meski mungkin read-only
+    return path
+
 
 def load_and_split(pdfs, chunk_size=1000, overlap=250):
     splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
@@ -87,42 +91,23 @@ def load_and_split(pdfs, chunk_size=1000, overlap=250):
         docs.extend(splitter.split_documents(pages))
     return docs
 
-def _ensure_persist_dir(path: str) -> str:
-    """Pastikan direktori persist bisa ditulis. Jika gagal, pakai /mount/data/chroma_store."""
-    try:
-        os.makedirs(path, exist_ok=True)
-        # uji tulis ringan
-        testf = os.path.join(path, ".write_test")
-        with open(testf, "w") as f:
-            f.write("ok")
-        os.remove(testf)
-        return path
-    except Exception:
-        fallback = "/mount/data/chroma_store"
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
+# --- semantic similarity helper (TIDAK diubah logikanya; hanya nama model) ---
+def cosine(a, b):
+    a, b = np.array(a, dtype=float), np.array(b, dtype=float)
+    den = (norm(a) * norm(b)) + 1e-8
+    return float(np.dot(a, b) / den)
 
-def build_chroma(docs, persist_dir):
-    persist_dir = _ensure_persist_dir(persist_dir)
-    # Ganti nama model ke format baru (bukan perubahan logika)
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-    vs = Chroma.from_documents(docs, embedding=embeddings, persist_directory=persist_dir)
-    vs.persist()
-    return vs
 
-def load_chroma(persist_dir):
-    # Ganti nama model ke format baru (bukan perubahan logika)
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-    return Chroma(persist_directory=persist_dir, embedding_function=embeddings)
+def semantic_match(question: str, context: str, min_sim: float = 0.23) -> bool:
+    """Cek kedekatan semantik Q vs konteks dengan embedding Gemini; jika rendah → fallback."""
+    if not question.strip() or not context.strip():
+        return False
+    # hanya perbaikan nama model (API requirement), bukan perubahan logika
+    emb = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    q = emb.embed_query(question[:2000])
+    c = emb.embed_query(context[:8000])  # ringkas konteks
+    return cosine(q, c) >= min_sim
 
-def save_docs_pickle(docs, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(docs, f)
-
-def load_docs_pickle(path):
-    with open(path, "rb") as f:
-        return pickle.load(f)
 
 def range_variations(q: str):
     """Varian rentang angka deterministik (tanpa LLM)."""
@@ -137,25 +122,61 @@ def range_variations(q: str):
         ])
     return list(vars)
 
-# --- semantic similarity helper ---
-def cosine(a, b):
-    a, b = np.array(a, dtype=float), np.array(b, dtype=float)
-    den = (norm(a) * norm(b)) + 1e-8
-    return float(np.dot(a, b) / den)
+# =========================
+# STREAMLIT SIDEBAR (sama, hanya default chroma ke path writeable)
+# =========================
+GOOGLE_API_KEY_ENV = os.getenv("GOOGLE_API_KEY", "")
+GOOGLE_API_KEY = st.sidebar.text_input("Masukkan GOOGLE_API_KEY (Google AI Studio):", value=GOOGLE_API_KEY_ENV, type="password")
+if GOOGLE_API_KEY:
+    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-def semantic_match(question: str, context: str, min_sim: float = 0.23) -> bool:
-    """Cek kedekatan semantik Q vs konteks dengan embedding Gemini; jika rendah → fallback."""
-    if not question.strip() or not context.strip():
-        return False
-    # Ganti nama model ke format baru (bukan perubahan logika)
-    emb = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-    q = emb.embed_query(question[:2000])
-    c = emb.embed_query(context[:8000])  # ringkas konteks
-    return cosine(q, c) >= min_sim
+st.sidebar.header("⚙️ Pengaturan")
+pdf_dir = st.sidebar.text_input("Folder PDF lokal", value="./pdfs")
+
+# Default ke path writeable; lalu diverifikasi dengan _ensure_persist_dir
+chroma_input = st.sidebar.text_input("Folder Chroma persist", value="/mount/data/chroma_store")
+chroma_dir = _ensure_persist_dir(chroma_input)
+
+# cache dokumen untuk BM25 akan disimpan di chroma_dir (yang sudah dipastikan writeable)
+docs_dump = os.path.join(chroma_dir, "docs.pkl")
+
+chunk_size = st.sidebar.slider("Ukuran chunk (karakter)", 500, 2500, 1000, 50)
+chunk_overlap = st.sidebar.slider("Overlap", 0, 600, 250, 10)
+top_k = st.sidebar.slider("Top-K retrieval", 3, 15, 10, 1)
+
+# JANGAN buat folder pdf_dir di repo (read-only). Biarkan hanya dibaca.
+# os.makedirs(pdf_dir, exist_ok=True)  # <-- DIHILANGKAN agar aman di Cloud
+
+build_btn = st.sidebar.button("🔨 Build / Refresh Index")
+clear_btn = st.sidebar.button("🧹 Clear Index")
 
 # =========================
-# INDEX MANAGEMENT
+# INDEX MANAGEMENT (logika aslimu dipertahankan)
 # =========================
+
+def build_chroma(docs, persist_dir):
+    # Sama seperti aslinya, kecuali nama model di-"models/" dan persist_dir sudah dipastikan writeable
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    vs = Chroma.from_documents(docs, embedding=embeddings, persist_directory=persist_dir)
+    vs.persist()
+    return vs
+
+
+def load_chroma(persist_dir):
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    return Chroma(persist_directory=persist_dir, embedding_function=embeddings)
+
+
+def save_docs_pickle(docs, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(docs, f)
+
+
+def load_docs_pickle(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
 if clear_btn:
     try:
         if os.path.exists(chroma_dir):
@@ -182,7 +203,7 @@ if build_btn:
         st.sidebar.success(f"Index siap ✅ ({count} chunk tersimpan)")
 
 # =========================
-# PREP LLM, VECTORSTORE, RETRIEVERS
+# PREP LLM, VECTORSTORE, RETRIEVERS (tetap sama)
 # =========================
 has_index = os.path.exists(chroma_dir) and any(glob.glob(os.path.join(chroma_dir, "*")))
 has_docs = os.path.exists(docs_dump)
@@ -206,9 +227,8 @@ if os.environ.get("GOOGLE_API_KEY"):
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
 
 # =========================
-# PROMPTS
+# PROMPTS & RAG CHAINS (persis seperti aslinya)
 # =========================
-# RAG: Natural, jika konteks dipakai -> jawab HANYA dari konteks
 rag_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -221,6 +241,7 @@ rag_prompt = ChatPromptTemplate.from_messages(
         ("human", "Additional text:\n{context}\n\nUser question:\n{question}")
     ]
 )
+
 fallback_prompt = ChatPromptTemplate.from_messages(
     [
         ("system", "You are a helpful, concise assistant. Always respond in the same language as the user's question."),
@@ -230,7 +251,7 @@ fallback_prompt = ChatPromptTemplate.from_messages(
 rag_chain = (rag_prompt | llm | StrOutputParser()) if llm else None
 fallback_chain = (fallback_prompt | llm | StrOutputParser()) if llm else None
 
-# Context Gate — LLM memutuskan USE atau SKIP
+# Context Gate — LLM memutuskan USE atau SKIP (tetap)
 gate_prompt = ChatPromptTemplate.from_messages(
     [
         ("system",
@@ -241,16 +262,15 @@ gate_prompt = ChatPromptTemplate.from_messages(
 )
 gate_chain = (gate_prompt | llm | StrOutputParser()) if llm else None
 
-# MultiQuery custom prompt (kuat di rentang angka)
+# MultiQuery custom prompt (kuat di rentang angka) — sama
 mq_prompt = PromptTemplate.from_template(
     "Buat 4 variasi kueri yang semakna untuk mencari jawaban dari peraturan/PO tentang: \"{question}\". "
-    "Jika ada angka rentang (mis. 81–160), tuliskan juga variasi: "
-    "\"81-160\", \"81 sampai 160\", \"81 s.d. 160\", \">=81 dan <=160\". "
+    "Jika ada angka rentang (mis. 81–160), tuliskan juga variasi: \"81-160\", \"81 sampai 160\", \"81 s.d. 160\", \">=81 dan <=160\". "
     "Jangan beri penjelasan; hanya daftar kueri (satu per baris)."
 )
 
 # =========================
-# CHAT STATE & ACTIONS
+# CHAT STATE & ACTIONS (sama)
 # =========================
 if "messages" not in st.session_state:
     st.session_state.messages = [
@@ -258,14 +278,7 @@ if "messages" not in st.session_state:
     ]
 st.session_state.setdefault("debug_context", "")
 
-# =========================
-# CHAT STATE & ACTIONS
-# =========================
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Ask DUPAK AI"}
-    ]
-st.session_state.setdefault("debug_context", "")
+# (duplikasi blok 'if messages not in ...' dihilangkan demi kebersihan; tidak mengubah logika)
 
 col1, col2, _ = st.columns([1, 1, 6])
 
@@ -290,7 +303,7 @@ for m in st.session_state.messages:
         st.markdown(m["content"])
 
 # =========================
-# CHAT INPUT + RAG (Ensemble + MultiQuery + Range Variations + Gate + SimCheck)
+# CHAT INPUT + RAG (Ensemble + MultiQuery + Range Variations + Gate + SimCheck) — sama
 # =========================
 user_input = st.chat_input("Ketik pertanyaanmu di sini…")
 
